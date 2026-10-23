@@ -2172,6 +2172,29 @@ wal_hook:
 maybe_checkpoint:
  ENTER
  mov eax,[wal_frames]
+ ; PASSIVE can finish copying an old snapshot while the owner keeps extending
+ ; the WAL. At a batch boundary the owner has no transaction or live cursor:
+ ; finish the tail and release the WAL read marks before accepting more work.
+ ; Never wait on the helper's checkpoint lock (the owner has busy_timeout=0).
+ ; SQLITE_BUSY simply retries at the next boundary. Only this thread writes.
+ cmp dword [checkpoint_bounded],0
+ je .passive
+ cmp eax,32768
+ jb .passive
+ mov rdi,[database]
+ xor esi,esi
+ mov edx,2                     ; SQLITE_CHECKPOINT_RESTART
+ xor ecx,ecx
+ xor r8d,r8d
+ call sqlite3_wal_checkpoint_v2
+ test eax,eax
+ jnz .done
+ mov dword [wal_frames],0
+ mov dword [wal_last_frames],0
+ mov dword [wal_checkpoint_at],4096
+ jmp .done
+.passive:
+ mov eax,[wal_frames]
  cmp eax,[wal_last_frames]
  jae .threshold
  mov dword [wal_checkpoint_at],4096

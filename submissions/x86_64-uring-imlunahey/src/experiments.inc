@@ -49,6 +49,8 @@ arg_eight_rings: db '--rings=8',0
 arg_accept_cascade: db '--accept=cascade',0
 arg_accept_striped: db '--accept=striped',0
 arg_accept_adaptive: db '--accept=adaptive',0
+arg_checkpoint_passive: db '--checkpoint=passive',0
+arg_checkpoint_bounded: db '--checkpoint=bounded',0
 section .data
 literal_copy_inline: dd 1
 requested_rings: dd 8
@@ -65,6 +67,7 @@ json_mode: dd 1
 savepoints_enabled: dd 0
 integer_mode: dd 1
 accept_mode: dd 2
+checkpoint_bounded: dd 1
 section .bss
 write_error: resd 1
 group_context: resd 1
@@ -117,6 +120,8 @@ parse_cli:
 .done: LEAVE
 section .data
 option_table:
+ dq arg_checkpoint_passive,checkpoint_bounded,0
+ dq arg_checkpoint_bounded,checkpoint_bounded,1
  dq arg_literal_scalar,literal_copy_inline,0
  dq arg_literal_inline,literal_copy_inline,1
  dq arg_collect_baseline,collect_policy,0

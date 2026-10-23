@@ -20,8 +20,10 @@ a transaction, but responses are not made visible until `COMMIT` succeeds.
 - WAL, `synchronous=NORMAL`, a 1 GiB mmap window, and prepared statements are
   used. All request data is still read from SQLite during that request.
 - Passive WAL page copying runs on the helper connection every 4,096 additional
-  frames instead of stalling the request owner. WAL retention after a successful
-  reset is limited to 16 MiB.
+  frames. At 32,768 frames the request owner attempts a restart checkpoint at a
+  transaction-free batch boundary so sustained writes cannot indefinitely
+  outrun passive copying. A busy helper is retried at the next boundary without
+  waiting on its checkpoint lock. WAL retention after reset is limited to 16 MiB.
 - The default feed discovers and serializes the newest 20 live rows once, scans
   the bounded live like-ID range, and fills in the counts in assembly. Sparse or
   unusually dense ranges fall back to the general live query.
@@ -40,8 +42,11 @@ a transaction, but responses are not made visible until `COMMIT` succeeds.
 
 The release defaults target 500,000 users, but that target is not a measured
 organizer score. The exact candidate passes 42/42 official checks and the
-extended protocol/crash-recovery suite. A matched separate-generator five-minute
-run remains necessary before claiming any leaderboard result.
+extended protocol/crash-recovery suite. Its local unchanged-k6 five-minute hold
+passes at 40,000 users: p95 0.668 ms, p99 4.972 ms, zero errors and 580.2 MiB peak
+server-cgroup memory. That is a selected-count confirmation, not its maximum.
+A matched separate-generator run remains necessary before claiming any
+leaderboard result.
 
 ## Provenance
 
@@ -65,3 +70,24 @@ SQLITE_PATH=/path/to/feed.db JWT_SECRET=twelve-dollar-challenge \
 
 `bash build.sh diagnostic` skips SQLite PGO for a quicker debug build. Build
 outputs and downloaded dependencies are ignored.
+
+## Reproduce local profiling
+
+`tools/profile.py` runs a fresh-database mixed saturation diagnostic (the
+challenge's 100:100:15:2 endpoint proportions, without think time). It supports
+`--profile` for sampled CPU profiling and `--server-arg=--checkpoint=passive`
+to compare the old checkpoint policy in the same binary. It is not a VU score.
+
+`tools/qualify.py --users 40000` runs the unchanged `bench/load.js`: a two-minute
+1,000-user warmup, 60-second ramp, full five-minute hold, and normal ramp-down.
+It requires passing latency/error thresholds, all response checks, no OOM kill,
+clean shutdown, and an SQLite integrity check. Both runners record the binary
+hash and resource evidence under ignored `results/` directories.
+
+These local Docker runners currently use Nix runtime executables and the
+`redis:8-alpine` image solely as a container shell; no Redis server is started.
+Run under `nix-shell -p python3 k6 wrk perf`. The server gets one CPU and 2 GiB
+with no swap; clients are separately accounted. Private same-host loopback,
+CPU placement, and a seccomp exception for io_uring make this diagnostic setup
+different from the organizer's unpinned droplet and separate load generator.
+See [PERFORMANCE.md](PERFORMANCE.md) for results and limitations.

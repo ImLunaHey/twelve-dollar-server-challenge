@@ -1,5 +1,105 @@
 # Local comparison
 
+## 2026-10-23 mixed profiling and checkpoint audit
+
+The current release binary is
+`6736582bea97ca87235ba66fbf69ef8befe172eeb1f8bf9318e9258da17c91f3`.
+The measurements below use an AMD Ryzen 7 PRO 8845HS, Linux 6.18.18, GCC 15.2.0
+through Nix, and source-built SQLite 3.54.0. These are local diagnostics, not
+organizer scores. Earlier experiments are retained separately below.
+
+### Final unchanged-k6 five-minute confirmation
+
+The exact current binary passed 40,000 users after a 1,000-user/two-minute
+warmup, 60-second ramp, **five-minute hold**, and normal 30-second ramp-down:
+
+| Users | Requests | p95 | p99 | HTTP/check failures | Peak server cgroup |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 40,000 | 1,493,768 | 0.668 ms | 4.972 ms | 0 / 0 | 580.2 MiB |
+
+Server limits: one CPU, 2 GiB, no swap, nofile=65,535. k6 1.6.1 ran in a
+separate 18-GiB/no-swap container, on CPUs 1-15; server threads shared CPU 0.
+They used a private loopback network with 32 source IPs. The host OS and other
+services are outside the server cgroup. Docker's seccomp filter was disabled
+for io_uring. No host sysctls were changed. These differences from the droplet
+mean this is **not an organizer score or a maximum-user search**.
+
+There were no OOM kills, shutdown exited successfully, and `integrity_check`
+returned `ok`. The WAL repeatedly reset rather than growing through the hold.
+Peak cgroup memory was approximately 71% lower than the preceding full run.
+The lower p95/p99 in this run should not be treated as an isolated causal
+latency improvement: these are two sequential trials on a shared host.
+
+Official checks passed 42/42; primitive tests, io_uring and epoll integration/
+crash recovery, and all 18 range/transaction differential fixtures passed.
+Reproducible timings, binary/workload hashes, resource samples and final states:
+[bounded run](research/bounded-40k-five-minute.json) and
+[preceding passive-only run](research/passive-40k-five-minute.json).
+
+500,000 users remain a target, not a demonstrated result. The additional
+`mjc/twelve-dollar-benchmark` maximum-user search is pending separately.
+
+### Why the restart guard was added
+
+The first full 40,000-user run passed the unchanged k6 workload after the
+required warmup, with a 60-second ramp and five-minute hold: 1,493,970 requests,
+p95 0.780 ms, p99 9.011 ms, and zero HTTP/check failures. However, server-cgroup
+memory peaked at 2,001.8 MiB and the WAL reached about 1,426.5 MiB. That run used
+the preceding `144c8277406ab683cfad5e26607efe283b7e06477eee627bd0f9c0dd6cbbbfab`
+binary. It is not evidence for the final checkpoint policy.
+
+Inspection during sustained traffic showed that the helper had copied all
+245,848 frames in its checkpoint snapshot, while the writer had already reached
+248,469. Passive copying was progressing, but continuous writes prevented WAL
+reset. The owner now attempts `SQLITE_CHECKPOINT_RESTART` at a transaction-free
+batch boundary once 32,768 frames are reached. It does not wait on a competing
+checkpoint lock; `SQLITE_BUSY` is retried at the next boundary. This is a restart
+guard, not an unconditional size cap in the presence of external readers.
+
+### Mixed saturation comparison
+
+`tools/profile.py` uses `wrk` 4.2.0, 128 persistent connections and four client
+threads. The Lua workload samples endpoint proportions 100:100:15:2 and checks
+response statuses/feed cardinality, but omits think time. Each trial starts
+from a fresh seed, warms for five seconds and measures for 25 seconds. Server
+limits are one CPU, 2 GiB, no swap and nofile=65,535; the client is in a separate
+cgroup. CPU placement and same-host private loopback differ from the organizer.
+
+The same binary was run in A/B/B/A order, selecting the old policy with
+`--checkpoint=passive`:
+
+| Trial | Policy | req/s | p95 ms | p99 ms | Peak cgroup MiB |
+| --- | --- | ---: | ---: | ---: | ---: |
+| A1 | Passive only | 70,706 | 2.698 | 5.134 | 1,535.9 |
+| B1 | Restart guard | 74,350 | 3.100 | 27.057 | 408.5 |
+| B2 | Restart guard | 65,206 | 2.958 | 19.584 | 405.7 |
+| A2 | Passive only | 78,866 | 2.436 | 13.012 | 1,636.2 |
+
+All trials had zero invalid responses and no reported transport errors. Memory
+includes charged page cache, not just process RSS. The guard reduces memory
+pressure, but is **not a demonstrated throughput win**: average throughput was
+about 6.7% lower, and short-run p99 increased. Host variation is substantial.
+The guard is retained for sustained-memory headroom, not advertised as faster.
+
+A second C/D/D/C experiment tested `--batch=128 --wait-us=0` against the default
+32/250-us policy for 20 seconds per trial. Defaults produced 69,360 and 68,611
+req/s; the candidate produced 72,183 and 66,381. The direction reversed between
+pairs, so the change was rejected. No defaults were changed on that evidence.
+
+A separate 25-second sampled profile collected 4,474 cycle samples with none
+lost. The largest named symbols were SQLite VDBE execution (10.81%), B-tree
+table lookup (8.05%) and WAL-frame lookup (7.38%). SHA compression rounds were
+0.65%; this does not motivate prioritizing a SHA-NI rewrite. These are flat
+samples, not inclusive call-tree costs. Kernel samples were collected but their
+symbols could not be resolved under the host's address restrictions. Profiled
+throughput (69,025 req/s) is diagnostic and excluded from the paired comparison.
+
+Raw comparisons and the symbol report are in
+[research/mixed-profile-evidence.json](research/mixed-profile-evidence.json)
+and [research/mixed-profile.txt](research/mixed-profile.txt).
+
+## Earlier experiments (historical binaries)
+
 This is a candidate comparison, not an organizer score. The inherited assembly
 baseline has separately reported a 275,000-user five-minute pass; reproducing a
 population that large requires a load generator with roughly 85 GiB of memory,
