@@ -36,15 +36,20 @@ a transaction, but responses are not made visible until `COMMIT` succeeds.
   high-population tail stalls seen with a timed wait on every ring.
 - Sends are drained before receives under pressure, and exhausted provided
   buffers are rearmed from bounded deferred queues.
+- Teardown cancels only still-pending operations, using exact generation-tagged
+  keys instead of FD-wide cancellation scans during mass disconnects.
 - Registered-file acceptance cascades through the first four rings. Near 260k
   live sockets the remaining four acceptors activate together, distributing the
   final working set instead of driving the eighth 65,535-slot table to its edge.
 
 The release defaults target 500,000 users, but that target is not a measured
-organizer score. The exact candidate passes 42/42 official checks and the
-extended protocol/crash-recovery suite. Its local unchanged-k6 five-minute hold
-passes at 40,000 users: p95 0.668 ms, p99 4.972 ms, zero errors and 580.2 MiB peak
-server-cgroup memory. That is a selected-count confirmation, not its maximum.
+organizer score. The candidate passes 42/42 official checks and the extended
+protocol/crash-recovery suite. The preceding checkpoint-guard binary passed an
+unchanged-k6 five-minute hold at 40,000 users: p95 0.668 ms, p99 4.972 ms, zero
+errors and 580.2 MiB peak server-cgroup memory. The newer teardown-fixed binary
+completed a native mjc five-minute hold at 275,000 users with zero errors, but
+**failed p99** (3,543.983 ms; p95 74.842 ms). No five-minute pass above 250,000
+users or maximum-user score has been established yet.
 A matched separate-generator run remains necessary before claiming any
 leaderboard result.
 
@@ -83,6 +88,16 @@ to compare the old checkpoint policy in the same binary. It is not a VU score.
 It requires passing latency/error thresholds, all response checks, no OOM kill,
 clean shutdown, and an SQLite integrity check. Both runners record the binary
 hash and resource evidence under ignored `results/` directories.
+
+`bash tools/build-mjc.sh` builds the pinned alternate generator with Rust 1.99.1
+and locked dependencies inside Ubuntu 24.04. Then `python3 tools/mjc.py --users
+275000 --duration 5m --warmup` performs a fixed-count native confirmation. The
+runner invokes the native orchestrator directly, avoiding the upstream shell
+launcher's host sysctl changes. It uses a separate client cgroup and requires
+native thresholds, zero failed endpoint checks, clean shutdown and database
+integrity before recording a pass. `--score --start-users 275000 --max-users
+500000` selects the native search workflow; a selected-count trial is not a
+maximum search. The same Nix-runtime limitation applies to this local wrapper.
 
 These local Docker runners currently use Nix runtime executables and the
 `redis:8-alpine` image solely as a container shell; no Redis server is started.

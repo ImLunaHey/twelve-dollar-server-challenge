@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Functional multi-ring live-socket proof; not a user-capacity score."""
 import argparse
+import http.client
 import json
 import os
 import pathlib
@@ -78,7 +79,23 @@ with tempfile.TemporaryDirectory() as tmp:
                         assert json.loads(b[:length])["db"]=="ok"
                         sel.unregister(s)
         rss = next(line for line in pathlib.Path(f"/proc/{proc.pid}/status").read_text().splitlines() if line.startswith("VmRSS:"))
-        print(json.dumps(dict(live_connections=len(sockets),server_nofile=args.server_nofile,
+        verified = len(sockets)
+        teardown_start = time.monotonic()
+        for s in sockets:s.close()
+        sockets.clear()
+        # A live-socket proof must not hide a fatal/quadratic disconnect path by
+        # terminating the server immediately after its clients close.
+        probe = http.client.HTTPConnection("127.0.0.1", args.port, timeout=5)
+        try:
+            probe.request("GET", "/health")
+            response = probe.getresponse()
+            assert response.status == 200
+            assert json.loads(response.read())["db"] == "ok"
+            assert proc.poll() is None, "server exited during connection teardown"
+        finally:
+            probe.close()
+        print(json.dumps(dict(live_connections=verified,server_nofile=args.server_nofile,
+                              teardown_health_s=time.monotonic()-teardown_start,
                               host_kernel=os.uname().release,elapsed_s=time.monotonic()-start,rss=rss,
                               evidence="functional native socket proof; not a constrained k6 score")),flush=True)
     finally:

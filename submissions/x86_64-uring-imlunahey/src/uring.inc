@@ -445,13 +445,32 @@ uring_close:
  jnz .done
  call timer_remove
  or dword [r12+60],16
- ; Cancel outstanding socket operations, then remove direct descriptor.
+ ; Only cancel operations that still own this generation. EOF normally clears
+ ; the receive bit before close, so it needs no cancellation at all. FD|ALL
+ ; cancellation scans unrelated requests in the ring and made mass disconnects
+ ; spend seconds in the kernel. Exact user_data uses the request lookup key.
+ test dword [r12+60],32
+ jz .cancel_send
  mov edi,ebx
  call uring_connection_sqe
  mov byte [rax],14
  mov byte [rax+1],0
- mov dword [rax+28],11 ; FD | ALL | FD_FIXED
+ mov rdx,[rax+32]
+ or rdx,0x200000
+ mov [rax+16],rdx
  or qword [rax+32],0x500000
+.cancel_send:
+ test dword [r12+60],64
+ jz .remove
+ mov edi,ebx
+ call uring_connection_sqe
+ mov byte [rax],14
+ mov byte [rax+1],0
+ mov rdx,[rax+32]
+ or rdx,0x300000
+ mov [rax+16],rdx
+ or qword [rax+32],0x500000
+.remove:
  mov edi,ebx
  call uring_connection_sqe
  mov byte [rax],19

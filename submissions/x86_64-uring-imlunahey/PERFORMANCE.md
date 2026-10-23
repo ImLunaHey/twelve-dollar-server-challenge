@@ -1,8 +1,60 @@
 # Local comparison
 
+## Native mjc benchmark: 275,000 users, five-minute failure
+
+The latest binary is
+`3a07352ab36159baf611f82fcaaa13d91939f415e05a70c7f7a3d7a0dfbe35d4`.
+It has **not yet passed a five-minute test above 250,000 users**. The native
+`mjc/twelve-dollar-benchmark` trial reached 275,000 users and completed a
+300.001-second full-load hold, but failed the p99 threshold:
+
+| Users | Requests | p95 | p99 | HTTP/check failures | Peak server cgroup |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 275,000 | 10,173,661 | 74.842 ms | 3,543.983 ms | 0 / 0 | 1,539.0 MiB |
+
+Latency percentiles cover the complete native run, including ramp and drain;
+the hold itself averaged 28,765 requests/s. Warmup was 1,000 users for two
+minutes, then the main trial used a 60-second ramp, five-minute hold and normal
+30-second ramp-down/10-second grace. There were no OOM events or TCP
+retransmissions, and the server shut down cleanly. Failure is failure: keeping
+the users connected does not qualify without passing latency thresholds.
+
+The generator is pinned to `e31cd6285704b436422c2fc100d3beb10e558f6c`, built
+with Rust 1.99.1 and locked dependencies on Ubuntu 24.04; its 82 tests passed.
+Server limits are one CPU, 2 GiB, no swap and nofile=65,535. The generator has a
+separate 12-GiB cgroup, nofile=1,048,576, four Tokio workers, and 64 loopback
+source IPs. CPUs 0 and its SMT sibling 8 are excluded from client placement.
+Private same-host loopback, host resources outside the server cgroup and newer
+hardware/kernel make this **not an organizer score**. Native HTTP latency
+excludes DNS/TCP setup; connection timing is reported separately.
+
+The generator observed 275,000 established connections; the shared namespace
+has two TCP endpoints per connection, not twice as many users. The native
+server descriptor census cannot see registered io_uring sockets. See the
+[selected native evidence](research/mjc-275k-five-minute-failed.json).
+
+An earlier attempt exposed a mass-disconnect failure after the five-minute
+hold. Closing every socket used FD-wide cancellation even when no receive or
+send remained pending. Teardown now cancels only outstanding operations by
+their exact generation-tagged completion key. A 275,000-user/15-second-hold
+screen passed after this change (p95 35.005 ms, p99 92.412 ms, zero errors), and
+the full failed-latency run above also completed teardown. The functional
+80,000-live-socket regression verified a new health response 1.071 seconds
+after starting to close all clients. Official checks passed 42/42 and both
+one-shot and multishot io_uring integration/crash recovery passed. These
+checks establish correctness of teardown, not the missing capacity score.
+
+A subsequent two-minute diagnostic hold at 275,000 users, without warmup,
+passed with p95 36.630 ms, p99 83.685 ms and zero errors. A read-only sidecar
+sampled ring state once per second and found no persistent deferred-buffer
+backlog. The five-minute tail failure was not reproduced and its cause remains
+unresolved. This shorter run does **not** supersede the failed five-minute
+qualification. Its [selected evidence](research/mjc-275k-two-minute-diagnostic.json)
+records the additional instrumentation and different duration.
+
 ## 2026-10-23 mixed profiling and checkpoint audit
 
-The current release binary is
+The preceding checkpoint-guard binary was
 `6736582bea97ca87235ba66fbf69ef8befe172eeb1f8bf9318e9258da17c91f3`.
 The measurements below use an AMD Ryzen 7 PRO 8845HS, Linux 6.18.18, GCC 15.2.0
 through Nix, and source-built SQLite 3.54.0. These are local diagnostics, not
@@ -10,7 +62,7 @@ organizer scores. Earlier experiments are retained separately below.
 
 ### Final unchanged-k6 five-minute confirmation
 
-The exact current binary passed 40,000 users after a 1,000-user/two-minute
+That exact binary passed 40,000 users after a 1,000-user/two-minute
 warmup, 60-second ramp, **five-minute hold**, and normal 30-second ramp-down:
 
 | Users | Requests | p95 | p99 | HTTP/check failures | Peak server cgroup |
@@ -36,8 +88,8 @@ Reproducible timings, binary/workload hashes, resource samples and final states:
 [bounded run](research/bounded-40k-five-minute.json) and
 [preceding passive-only run](research/passive-40k-five-minute.json).
 
-500,000 users remain a target, not a demonstrated result. The additional
-`mjc/twelve-dollar-benchmark` maximum-user search is pending separately.
+500,000 users remain a target, not a demonstrated result. The native maximum
+search is still pending; the newer fixed-population trial is described above.
 
 ### Why the restart guard was added
 
