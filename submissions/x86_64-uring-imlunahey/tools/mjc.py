@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import time
@@ -27,6 +28,10 @@ p.add_argument('--score', action='store_true')
 p.add_argument('--start-users', type=int, default=275000)
 p.add_argument('--max-users', type=int, default=500000)
 p.add_argument('--label', default='mjc')
+p.add_argument('--server-arg', action='append', default=[])
+p.add_argument('--inspect-rings', action='store_true', help='read-only diagnostic sidecar; not a clean qualification')
+p.add_argument('--pause-after', type=float, help='diagnostic only: pause server after this many benchmark seconds')
+p.add_argument('--pause-seconds', type=float, default=0.5)
 a = p.parse_args()
 if not GENERATOR.exists() or not Path('/nix/store').exists():
     p.error('build the Ubuntu generator first; this local runner requires Nix for the server runtime')
@@ -38,6 +43,7 @@ out = ROOT/'results'/(a.label+'-'+time.strftime('%Y%m%dT%H%M%S'))
 out.mkdir(parents=True, exist_ok=False)
 server = 'nasm-mjc-'+uuid.uuid4().hex[:10]
 clients = []
+inspector = None
 mounts = ['-v', f'{REPO}:/repo:ro', '-v', f'{out}:/results',
           '-v', '/nix/store:/nix/store:ro']
 image = 'ubuntu:24.04'
@@ -96,8 +102,22 @@ def workload(label, options):
     save()
     with (out/(label+'.log')).open('w') as log:
         proc = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
+        started = time.monotonic()
+        paused_once = False
         while proc.poll() is None:
             time.sleep(10)
+            if (label == 'benchmark' and a.pause_after is not None and not paused_once
+                    and time.monotonic()-started >= a.pause_after):
+                # A diagnostic fault injection, never a qualification run.
+                # Resume in finally even if the pause wait is interrupted.
+                run(['docker', 'pause', server])
+                evidence['injected_pause'] = dict(start=time.time(), requested_seconds=a.pause_seconds)
+                try:
+                    time.sleep(a.pause_seconds)
+                finally:
+                    run(['docker', 'unpause', server])
+                    evidence['injected_pause']['finished'] = time.time()
+                paused_once = True
             try:
                 row = sample()
             except subprocess.CalledProcessError:
@@ -152,7 +172,7 @@ try:
         '-e', 'JWT_SECRET=twelve-dollar-challenge', '-e', 'HOST=127.0.0.1',
         '-e', 'PORT=8080', image, '-c',
         'mkdir -p /work && cp /repo/seed/feed.db /work/feed.db && '
-        'exec /repo/submissions/x86_64-uring-imlunahey/bin/server'])
+        'exec /repo/submissions/x86_64-uring-imlunahey/bin/server '+shlex.join(a.server_arg)])
     for _ in range(100):
         health = subprocess.run(['docker', 'exec', server, sys.executable, '-c',
             'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8080/health").read())'],
@@ -163,6 +183,24 @@ try:
     else:
         raise RuntimeError('server did not become healthy')
     evidence['server_inspect'] = json.loads(run(['docker', 'inspect', server]))[0]
+    if a.inspect_rings:
+        symbols = {}
+        wanted = {'ring_contexts', 'uring_count', 'request_count', 'active_count',
+                  'input_allocated', 'output_allocated', 'wal_frames',
+                  'wal_log', 'wal_checkpointed', 'checkpoint_requested'}
+        for line in run(['nm', '-n', str(ROOT/'bin/server')]).splitlines():
+            fields = line.split()
+            if len(fields) == 3 and fields[2] in wanted:
+                symbols[fields[2]] = int(fields[0], 16)
+        if symbols.keys() != wanted:
+            raise RuntimeError('missing symbols for read-only ring diagnostics')
+        inspector = server+'-inspector'
+        run(['docker', 'run', '-d', '--name', inspector, '--network', 'none',
+             '--pid', 'container:'+server, '--cap-add', 'SYS_PTRACE',
+             '--cpuset-cpus', '7', '--memory', '128m', '--memory-swap', '128m',
+             '--entrypoint', sys.executable, *mounts, image,
+             '/repo/submissions/x86_64-uring-imlunahey/tools/inspect-rings.py',
+             '--symbols', json.dumps(symbols), '--output', '/results/rings.jsonl'])
     if a.warmup and not a.score:
         if not workload('warmup', ['--users', '1000', '--ramp-up', '1s', '--duration', '2m']):
             raise RuntimeError('warmup failed; inspect reports')
@@ -188,7 +226,7 @@ finally:
     save()
     logs = subprocess.run(['docker', 'logs', server], capture_output=True, text=True)
     (out/'server.log').write_text(logs.stdout+logs.stderr)
-    for container in [*clients, server]:
+    for container in [*clients, *([inspector] if inspector else []), server]:
         subprocess.run(['docker', 'rm', '-f', container], capture_output=True)
     print(f'Evidence: {out}', flush=True)
 if not evidence.get('passed'):

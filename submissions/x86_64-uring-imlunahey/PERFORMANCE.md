@@ -1,10 +1,100 @@
 # Local comparison
 
-## Native mjc benchmark: 275,000 users, five-minute failure
+## Five-minute confirmation: 275,000 users PASS
 
-The latest binary is
+The FIFO candidate below passed a clean native mjc confirmation after a
+1,000-user/two-minute warmup, 60-second ramp, **300.001-second full-load hold**
+and normal ramp-down. No deliberate pause, ring inspector or perf profiler
+was used for this confirmation.
+
+| Users reached | Requests | p95 | p99 | HTTP/check failures | Peak server cgroup |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 275,000 | 10,267,297 | 32.489 ms | 72.998 ms | 0 / 0 | 1,385.8 MiB |
+
+The maximum observed request latency was 555.303 ms. The sampled hold averaged
+29,094 requests/s and 59.0% of one CPU. The server had one CPU, 2 GiB, no swap,
+and nofile=65,535; generator limits and topology are unchanged from the earlier
+native trials. There were no OOM events, shutdown exited zero, and the database
+integrity check returned `ok`.
+
+The earlier uninstrumented five-minute run failed at p99 3,543.983 ms; an
+instrumented repeat failed at 1,304.078 ms. All those failures are retained
+below. The new pass verifies this selected population, **not maximum capacity,
+500,000 users, or an organizer score**. Host variation means the precise
+before/after latency ratio is not an isolated causal measurement. It is also
+not a matched comparison against the Rust submission on the organizer's VM.
+
+See [research/mjc-275k-fifo-five-minute.json](research/mjc-275k-fifo-five-minute.json)
+for the exact binary/generator hashes, limits and native results.
+
+## Receive-retry fairness investigation
+
+The receive-retry candidate is
+`4c195011c6776e03a70e1808bec4ad6a90840535aa8b82fecec86a5c710e96d3`.
+An instrumented repeat of the preceding 275,000-user five-minute workload
+failed again: p95 71.853 ms, p99 1,304.078 ms, zero HTTP/check failures. The
+long requests now clustered around the end of ramp-up/early hold, not the same
+two windows as the earlier failure. One-second read-only snapshots captured
+**32,375 deferred receives in one ring and 56,568 across all rings**. This
+identified a server-side mechanism that can amplify a temporary traffic burst
+or scheduling stall, without establishing the trigger of every original stall.
+
+The old retry policy required the completion queue to become entirely empty.
+Continuous completions could therefore delay older ENOBUFS-paused connections
+for seconds. The candidate makes two changes:
+
+- A nonempty completion queue can still make bounded retry progress, paced by
+  buffers returned during that owner visit, capped at 128 retry entries.
+- While a retry FIFO exists, fresh receive rearms join its tail instead of
+  bypassing older paused connections. The drain submits the FIFO head directly.
+
+Credits control retry work; they do not claim exclusive ownership of buffers
+that another pending kernel receive might consume. Generation/closing checks
+are retained. Buffer sizes, ring count, SQLite settings and resource limits
+are unchanged. `--enobuf-drain=empty` selects the previous policy for controls.
+
+### Controlled overload screens (not qualification)
+
+Each trial used 275,000 users, a 60-second ramp, one-minute hold and normal
+ramp-down, without warmup. At approximately 80 seconds after launching the
+generator, the server cgroup was paused for half a second and then resumed.
+Read-only queue/scheduler sampling was enabled. The freeze deliberately
+accumulates requests beyond the provided-buffer capacity.
+
+| Policy | p99 | Requests over 1 s | First sampled empty retry queues after resume |
+| --- | ---: | ---: | ---: |
+| Original empty-CQ gate | 118.716 ms | 13,260 | 3.569 s |
+| Returned-buffer credits only | 154.725 ms | 7,018 | 3.181 s |
+| Credits plus FIFO admission | 89.482 ms | 3,196 | 2.127 s |
+
+All three screens had zero HTTP/check failures, clean shutdown and successful
+database integrity checks. The credits-only change did not improve aggregate
+p99; FIFO admission was needed for the final candidate. One-second sampling
+only bounds observed recovery, and sequential shared-host trials do not isolate
+all variation. The new FIFO also contains fresh rearms, so its raw queue length
+is not directly equivalent to the old count of ENOBUFS failures. The separate
+over-one-second request counts matter more than a short-run p99 alone.
+
+Official checks passed 42/42 on the FIFO candidate. Deterministic tests execute
+the real NASM drain function against fake ring state: old-policy starvation,
+credit bounds, FIFO ordering, generation safety, closing/pending receives and
+logical ring addressing. One-shot and multishot integration/crash recovery,
+5,000-connection feed bursts and fragmented-upload pressure tests also passed.
+After confirmation, forced-epoll integration/crash recovery and the 80,000-live-
+socket teardown regression passed too (fresh health response in 0.969 seconds
+after starting disconnects).
+`tests/enobuf-policy.py` needs GCC, binutils and system SQLite only to resolve
+unused symbols in its test executable; the submitted server still uses the
+pinned source-built SQLite. The C test driver is never linked into that server.
+
+Exact hashes, configurations, native reports, slow-request counts and selected
+queue observations are in [research/enobuf-tail-investigation.json](research/enobuf-tail-investigation.json).
+
+## Before fairness: native 275,000-user five-minute failure
+
+The preceding teardown-fixed binary was
 `3a07352ab36159baf611f82fcaaa13d91939f415e05a70c7f7a3d7a0dfbe35d4`.
-It has **not yet passed a five-minute test above 250,000 users**. The native
+It had **not passed a five-minute test above 250,000 users**. The native
 `mjc/twelve-dollar-benchmark` trial reached 275,000 users and completed a
 300.001-second full-load hold, but failed the p99 threshold:
 

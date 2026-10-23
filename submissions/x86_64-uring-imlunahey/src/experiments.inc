@@ -23,6 +23,8 @@ arg_nodelay_on: db '--nodelay=on',0
 arg_nodelay_off: db '--nodelay=off',0
 arg_enobuf_defer: db '--enobuf=defer',0
 arg_enobuf_immediate: db '--enobuf=immediate',0
+arg_enobuf_empty: db '--enobuf-drain=empty',0
+arg_enobuf_fair: db '--enobuf-drain=fair',0
 arg_send_first: db '--completion-order=send-first',0
 arg_fifo: db '--completion-order=fifo',0
 arg_recv_one: db '--recv=one',0
@@ -62,6 +64,7 @@ nodelay: dd 0
 recv_mode: dd 0
 completion_order: dd 1
 enobuf_mode: dd 1
+enobuf_fair: dd 1
 query_mode: dd 3
 json_mode: dd 1
 savepoints_enabled: dd 0
@@ -162,6 +165,8 @@ option_table:
  dq arg_nodelay_off,nodelay,0
  dq arg_enobuf_defer,enobuf_mode,1
  dq arg_enobuf_immediate,enobuf_mode,0
+ dq arg_enobuf_empty,enobuf_fair,0
+ dq arg_enobuf_fair,enobuf_fair,1
  dq arg_send_first,completion_order,1
  dq arg_fifo,completion_order,0
  dq arg_recv_one,recv_mode,0

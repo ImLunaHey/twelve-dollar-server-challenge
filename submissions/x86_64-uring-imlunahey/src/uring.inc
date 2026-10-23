@@ -389,7 +389,13 @@ uring_connection_sqe:
  mov [rax+32],rcx
  LEAVE
 uring_recv:
+ xor esi,esi
+ jmp uring_recv_internal
+uring_recv_retry:
+ mov esi,1
+uring_recv_internal:
  ENTER
+ mov r15d,esi
  mov ebx,edi
  mov r12d,edi
  shl r12,6
@@ -399,6 +405,28 @@ uring_recv:
  jnz .done
  test dword [r12+60],32|256
  jnz .done
+ ; Once a retry FIFO exists, freshly finished requests must not jump ahead of
+ ; its older sockets and consume their newly returned buffers. The bounded
+ ; drain uses the retry entry point to submit the FIFO head directly.
+ test r15d,r15d
+ jnz .submit
+ cmp dword [enobuf_mode],0
+ je .submit
+ cmp dword [enobuf_fair],0
+ je .submit
+ mov eax,ebx
+ shr eax,16
+ shl rax,9
+ lea rdx,[ring_contexts]
+ add rdx,rax
+ mov eax,[rdx+128]
+ cmp eax,[rdx+132]
+ je .submit
+ mov edi,ebx
+ call uring_enobuf_pause
+ jmp .done
+.submit:
+ mov edi,ebx
  call uring_connection_sqe
  mov byte [rax],27
  or byte [rax+1],32 ; buffer selection
@@ -538,10 +566,15 @@ uring_return_buffer:
  mov [r8+112],edx
  mov rax,[r8+96]
  mov [rax+14],dx
+ inc dword [r8+136] ; buffers returned during this owner visit
  ret
 ; ENOBUFS retry entries retain no pointers or kernel ownership. One entry per
 ; paused connection, tagged with its generation; stale entries are harmless.
-; Only rearm after consuming the frozen CQ, outside all SQLite transactions.
+; Rearm outside SQLite transactions. Waiting for an entirely empty CQ starves
+; paused sockets under continuous traffic. A nonempty CQ gets a retry budget
+; bounded by this visit's returned buffers, so retries progress without an
+; unrestricted ENOBUFS loop. These are pacing credits, not ownership claims:
+; another pending receive can consume a returned buffer before a retry runs.
 uring_enobuf_drain:
  ENTER
  xor ebp,ebp
@@ -550,14 +583,22 @@ uring_enobuf_drain:
  shl r12,9
  lea rax,[ring_contexts]
  add r12,rax
+ mov dword [rsp],128
  mov rax,[r12+64]
  mov edx,[rax]
  mov rax,[r12+72]
  cmp edx,[rax]
- jne .done
- xor ebp,ebp
+ je .loop
+ cmp dword [enobuf_fair],0
+ je .done
+ mov eax,[r12+136]
+ test eax,eax
+ jz .done
+ cmp eax,128
+ jae .loop
+ mov [rsp],eax
 .loop:
- cmp ebp,128
+ cmp ebp,[rsp]
  jae .done
  mov eax,[r12+128]
  cmp eax,[r12+132]
@@ -585,7 +626,7 @@ uring_enobuf_drain:
  jz .loop
  and dword [r15+60],~256
  mov edi,r13d
- call uring_recv
+ call uring_recv_retry
  jmp .loop
 .done:
  mov eax,ebp
@@ -790,6 +831,7 @@ uring_loop:
  test eax,eax
  js fatal
 .collected:
+ mov dword [r12+136],0
  mov eax,228
  mov edi,1
  lea rsi,[batch_clock_start]

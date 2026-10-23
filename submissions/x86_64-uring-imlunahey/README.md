@@ -35,23 +35,27 @@ a transaction, but responses are not made visible until `COMMIT` succeeds.
   at most one timed wait per complete eight-ring owner sweep. This reduces the
   high-population tail stalls seen with a timed wait on every ring.
 - Sends are drained before receives under pressure, and exhausted provided
-  buffers are rearmed from bounded deferred queues.
+  buffers are rearmed from bounded deferred queues. Retries make progress on
+  returned-buffer credits even while completions keep arriving; fresh receive
+  rearms join an existing FIFO instead of bypassing older paused sockets.
 - Teardown cancels only still-pending operations, using exact generation-tagged
   keys instead of FD-wide cancellation scans during mass disconnects.
 - Registered-file acceptance cascades through the first four rings. Near 260k
   live sockets the remaining four acceptors activate together, distributing the
   final working set instead of driving the eighth 65,535-slot table to its edge.
 
-The release defaults target 500,000 users, but that target is not a measured
-organizer score. The candidate passes 42/42 official checks and the extended
-protocol/crash-recovery suite. The preceding checkpoint-guard binary passed an
-unchanged-k6 five-minute hold at 40,000 users: p95 0.668 ms, p99 4.972 ms, zero
-errors and 580.2 MiB peak server-cgroup memory. The newer teardown-fixed binary
-completed a native mjc five-minute hold at 275,000 users with zero errors, but
-**failed p99** (3,543.983 ms; p95 74.842 ms). No five-minute pass above 250,000
-users or maximum-user score has been established yet.
-A matched separate-generator run remains necessary before claiming any
-leaderboard result.
+The current candidate passes 42/42 official checks and the extended protocol/
+crash-recovery suite. It also passed a local native mjc **five-minute hold at
+275,000 users** after warmup: p95 **32.489 ms**, p99 **72.998 ms**, zero HTTP/check
+failures and **1,385.8 MiB** peak server-cgroup memory under a one-CPU/2-GiB limit.
+The earlier teardown-only candidate failed p99; both failures and the retry
+fairness investigation are retained in [PERFORMANCE.md](PERFORMANCE.md).
+
+The preceding checkpoint-guard binary separately passed the unchanged k6
+five-minute workload at 40,000 users. These are local selected-count trials,
+not a maximum search or organizer score. 500,000 users remain a target, not a
+demonstrated result. A matched separate-generator run remains necessary before
+claiming a leaderboard result or superiority over another language.
 
 ## Provenance
 
@@ -98,6 +102,12 @@ native thresholds, zero failed endpoint checks, clean shutdown and database
 integrity before recording a pass. `--score --start-users 275000 --max-users
 500000` selects the native search workflow; a selected-count trial is not a
 maximum search. The same Nix-runtime limitation applies to this local wrapper.
+
+For overload diagnosis, `--inspect-rings --pause-after 80 --pause-seconds 0.5`
+adds read-only ring/scheduler snapshots and a deliberate half-second server
+pause. These are **diagnostic runs, not qualification**. Use
+`--server-arg=--enobuf-drain=empty` to compare the previous retry policy. The
+normal runner does not pause or inspect the server and changes no host sysctls.
 
 These local Docker runners currently use Nix runtime executables and the
 `redis:8-alpine` image solely as a container shell; no Redis server is started.
